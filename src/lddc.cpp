@@ -37,12 +37,45 @@
 #include "driver_node.h"
 #include "lds_lidar.h"
 
+// Helper to rotate a vector [x, y, z] by roll, pitch, yaw
+void RotateVector(float &x, float &y, float &z, float roll, float pitch, float yaw) {
+    // Precompute sines and cosines
+    float cr = cos(roll);  float sr = sin(roll);
+    float cp = cos(pitch); float sp = sin(pitch);
+    float cy = cos(yaw);   float sy = sin(yaw);
+
+    float x_orig = x;
+    float y_orig = y;
+    float z_orig = z;
+
+    // Rotation Matrix (Standard Rz * Ry * Rx order)
+    // Row 1
+    float r11 = cy * cp;
+    float r12 = cy * sp * sr - sy * cr;
+    float r13 = cy * sp * cr + sy * sr;
+    
+    // Row 2
+    float r21 = sy * cp;
+    float r22 = sy * sp * sr + cy * cr;
+    float r23 = sy * sp * cr - cy * sr;
+
+    // Row 3
+    float r31 = -sp;
+    float r32 = cp * sr;
+    float r33 = cp * cr;
+
+    // Apply rotation
+    x = r11 * x_orig + r12 * y_orig + r13 * z_orig;
+    y = r21 * x_orig + r22 * y_orig + r23 * z_orig;
+    z = r31 * x_orig + r32 * y_orig + r33 * z_orig;
+}
+
 namespace livox_ros {
 
 /** Lidar Data Distribute Control--------------------------------------------*/
 #ifdef BUILDING_ROS1
 Lddc::Lddc(int format, int multi_topic, int data_src, int output_type,
-    double frq, std::string &frame_id, bool lidar_bag, bool imu_bag)
+    double frq, std::string &frame_id, bool lidar_bag, bool imu_bag, bool invert_lidar)
     : transfer_format_(format),
       use_multi_topic_(multi_topic),
       data_src_(data_src),
@@ -50,7 +83,8 @@ Lddc::Lddc(int format, int multi_topic, int data_src, int output_type,
       publish_frq_(frq),
       frame_id_(frame_id),
       enable_lidar_bag_(lidar_bag),
-      enable_imu_bag_(imu_bag) {
+      enable_imu_bag_(imu_bag),
+      invert_lidar_(invert_lidar) {
   publish_period_ns_ = kNsPerSecond / publish_frq_;
   lds_ = nullptr;
   memset(private_pub_, 0, sizeof(private_pub_));
@@ -62,13 +96,14 @@ Lddc::Lddc(int format, int multi_topic, int data_src, int output_type,
 }
 #elif defined BUILDING_ROS2
 Lddc::Lddc(int format, int multi_topic, int data_src, int output_type,
-           double frq, std::string &frame_id)
+           double frq, std::string &frame_id, bool invert_lidar)
     : transfer_format_(format),
       use_multi_topic_(multi_topic),
       data_src_(data_src),
       output_type_(output_type),
       publish_frq_(frq),
-      frame_id_(frame_id) {
+      frame_id_(frame_id),
+      invert_lidar_(invert_lidar) {
   publish_period_ns_ = kNsPerSecond / publish_frq_;
   lds_ = nullptr;
 #if 0
@@ -209,7 +244,7 @@ void Lddc::PublishPointcloud2(LidarDataQueue *queue, uint8_t index) {
 
     PointCloud2 cloud;
     uint64_t timestamp = 0;
-    InitPointcloud2Msg(pkg, cloud, timestamp);
+    InitPointcloud2Msg(pkg, cloud, timestamp, index);
     PublishPointcloud2Data(index, timestamp, cloud);
   }
 }
@@ -225,7 +260,7 @@ void Lddc::PublishCustomPointcloud(LidarDataQueue *queue, uint8_t index) {
 
     CustomMsg livox_msg;
     InitCustomMsg(livox_msg, pkg, index);
-    FillPointsToCustomMsg(livox_msg, pkg);
+    FillPointsToCustomMsg(livox_msg, pkg, index);
     PublishCustomPointData(livox_msg, index);
   }
 }
@@ -253,7 +288,7 @@ void Lddc::PublishPclMsg(LidarDataQueue *queue, uint8_t index) {
     PointCloud cloud;
     uint64_t timestamp = 0;
     InitPclMsg(pkg, cloud, timestamp);
-    FillPointsToPclMsg(pkg, cloud);
+    FillPointsToPclMsg(pkg, cloud, index);
     PublishPclData(index, timestamp, cloud);
   }
   return;
@@ -295,7 +330,7 @@ void Lddc::InitPointcloud2MsgHeader(PointCloud2& cloud) {
   cloud.point_step = sizeof(LivoxPointXyzrtlt);
 }
 
-void Lddc::InitPointcloud2Msg(const StoragePacket& pkg, PointCloud2& cloud, uint64_t& timestamp) {
+void Lddc::InitPointcloud2Msg(const StoragePacket& pkg, PointCloud2& cloud, uint64_t& timestamp, uint8_t index) {
   InitPointcloud2MsgHeader(cloud);
 
   cloud.point_step = sizeof(LivoxPointXyzrtlt);
@@ -316,12 +351,28 @@ void Lddc::InitPointcloud2Msg(const StoragePacket& pkg, PointCloud2& cloud, uint
       cloud.header.stamp = rclcpp::Time(timestamp);
   #endif
 
+  // Get Extrinsic Params to check if they are being used
+  float roll  = lds_->lidars_[index].livox_config.extrinsic_param.roll;
+  float pitch = lds_->lidars_[index].livox_config.extrinsic_param.pitch;
+  float yaw   = lds_->lidars_[index].livox_config.extrinsic_param.yaw;
+
+  // Logic: If config file params are ALL zero, and invert_lidar is true, apply inversion.
+  // If params are NOT zero, the SDK has already transformed the points.
+  bool use_manual_inversion = (roll == 0.0 && pitch == 0.0 && yaw == 0.0) && invert_lidar_;
+
   std::vector<LivoxPointXyzrtlt> points;
   for (size_t i = 0; i < pkg.points_num; ++i) {
     LivoxPointXyzrtlt point;
     point.x = pkg.points[i].x;
-    point.y = pkg.points[i].y;
-    point.z = pkg.points[i].z;
+    
+    if (use_manual_inversion) {
+      point.y = -pkg.points[i].y;
+      point.z = -pkg.points[i].z;
+    } else {
+      point.y = pkg.points[i].y;
+      point.z = pkg.points[i].z;
+    }
+
     point.reflectivity = pkg.points[i].intensity;
     point.tag = pkg.points[i].tag;
     point.line = pkg.points[i].line;
@@ -381,14 +432,30 @@ void Lddc::InitCustomMsg(CustomMsg& livox_msg, const StoragePacket& pkg, uint8_t
   }
 }
 
-void Lddc::FillPointsToCustomMsg(CustomMsg& livox_msg, const StoragePacket& pkg) {
+void Lddc::FillPointsToCustomMsg(CustomMsg& livox_msg, const StoragePacket& pkg, uint8_t index) {
   uint32_t points_num = pkg.points_num;
   const std::vector<PointXyzlt>& points = pkg.points;
+
+  // Get Extrinsic Params to check if they are being used
+  float roll  = lds_->lidars_[index].livox_config.extrinsic_param.roll;
+  float pitch = lds_->lidars_[index].livox_config.extrinsic_param.pitch;
+  float yaw   = lds_->lidars_[index].livox_config.extrinsic_param.yaw;
+
+  bool use_manual_inversion = (roll == 0.0 && pitch == 0.0 && yaw == 0.0) && invert_lidar_;
+
   for (uint32_t i = 0; i < points_num; ++i) {
     CustomPoint point;
     point.x = points[i].x;
-    point.y = points[i].y;
-    point.z = points[i].z;
+    
+    // [Modified] Priority Logic
+    if (use_manual_inversion) {
+      point.y = -points[i].y;
+      point.z = -points[i].z;
+    } else {
+      point.y = points[i].y;
+      point.z = points[i].z;
+    }
+    
     point.reflectivity = points[i].intensity;
     point.tag = points[i].tag;
     point.line = points[i].line;
@@ -434,7 +501,7 @@ void Lddc::InitPclMsg(const StoragePacket& pkg, PointCloud& cloud, uint64_t& tim
   return;
 }
 
-void Lddc::FillPointsToPclMsg(const StoragePacket& pkg, PointCloud& pcl_msg) {
+void Lddc::FillPointsToPclMsg(const StoragePacket& pkg, PointCloud& pcl_msg, uint8_t index) {
 #ifdef BUILDING_ROS1
   if (pkg.points.empty()) {
     return;
@@ -442,11 +509,27 @@ void Lddc::FillPointsToPclMsg(const StoragePacket& pkg, PointCloud& pcl_msg) {
 
   uint32_t points_num = pkg.points_num;
   const std::vector<PointXyzlt>& points = pkg.points;
+
+  // Get Extrinsic Params to check if they are being used
+  float roll  = lds_->lidars_[index].livox_config.extrinsic_param.roll;
+  float pitch = lds_->lidars_[index].livox_config.extrinsic_param.pitch;
+  float yaw   = lds_->lidars_[index].livox_config.extrinsic_param.yaw;
+
+  bool use_manual_inversion = (roll == 0.0 && pitch == 0.0 && yaw == 0.0) && invert_lidar_;
+
   for (uint32_t i = 0; i < points_num; ++i) {
     pcl::PointXYZI point;
     point.x = points[i].x;
-    point.y = points[i].y;
-    point.z = points[i].z;
+    
+    // [Modified] Priority Logic
+    if (use_manual_inversion) {
+      point.y = -points[i].y;
+      point.z = -points[i].z;
+    } else {
+      point.y = points[i].y;
+      point.z = points[i].z;
+    }
+
     point.intensity = points[i].intensity;
 
     pcl_msg.points.push_back(std::move(point));
@@ -477,7 +560,7 @@ void Lddc::PublishPclData(const uint8_t index, const uint64_t timestamp, const P
   return;
 }
 
-void Lddc::InitImuMsg(const ImuData& imu_data, ImuMsg& imu_msg, uint64_t& timestamp) {
+void Lddc::InitImuMsg(const ImuData& imu_data, ImuMsg& imu_msg, uint64_t& timestamp, uint8_t index) {
   imu_msg.header.frame_id = "livox_frame";
 
   timestamp = imu_data.time_stamp;
@@ -487,12 +570,43 @@ void Lddc::InitImuMsg(const ImuData& imu_data, ImuMsg& imu_msg, uint64_t& timest
   imu_msg.header.stamp = rclcpp::Time(timestamp);  // to ros time stamp
 #endif
 
-  imu_msg.angular_velocity.x = imu_data.gyro_x;
-  imu_msg.angular_velocity.y = imu_data.gyro_y;
-  imu_msg.angular_velocity.z = imu_data.gyro_z;
-  imu_msg.linear_acceleration.x = imu_data.acc_x;
-  imu_msg.linear_acceleration.y = imu_data.acc_y;
-  imu_msg.linear_acceleration.z = imu_data.acc_z;
+  float gx = imu_data.gyro_x;
+  float gy = imu_data.gyro_y;
+  float gz = imu_data.gyro_z;
+  float ax = imu_data.acc_x;
+  float ay = imu_data.acc_y;
+  float az = imu_data.acc_z;
+
+  // 2. Get Extrinsic Params from the LSD object
+  // Note: DEG2RAD might be needed if config is in degrees. 
+  // Livox SDK usually stores extrinsics in degrees in the config struct.
+  float roll  = lds_->lidars_[index].livox_config.extrinsic_param.roll * M_PI / 180.0;
+  float pitch = lds_->lidars_[index].livox_config.extrinsic_param.pitch * M_PI / 180.0;
+  float yaw   = lds_->lidars_[index].livox_config.extrinsic_param.yaw * M_PI / 180.0;
+
+  // 3. Apply Rotation Logic
+  // PRIORITY 1: If config file has extrinsics, use them.
+  if (roll != 0.0 || pitch != 0.0 || yaw != 0.0) {
+      RotateVector(gx, gy, gz, roll, pitch, yaw);
+      RotateVector(ax, ay, az, roll, pitch, yaw);
+  } 
+  // PRIORITY 2: If no extrinsics, check the launch file flag.
+  else if (invert_lidar_) {
+      // Manual Inversion (Equivalent to 180 degree roll)
+      // Flip Y and Z axes
+      gy = -gy;
+      gz = -gz;
+      ay = -ay;
+      az = -az;
+  }
+
+  // 4. Assign Final Values to Message
+  imu_msg.angular_velocity.x = gx;
+  imu_msg.angular_velocity.y = gy;
+  imu_msg.angular_velocity.z = gz;
+  imu_msg.linear_acceleration.x = ax;
+  imu_msg.linear_acceleration.y = ay;
+  imu_msg.linear_acceleration.z = az;
 }
 
 void Lddc::PublishImuData(LidarImuDataQueue& imu_data_queue, const uint8_t index) {
@@ -504,7 +618,7 @@ void Lddc::PublishImuData(LidarImuDataQueue& imu_data_queue, const uint8_t index
 
   ImuMsg imu_msg;
   uint64_t timestamp;
-  InitImuMsg(imu_data, imu_msg, timestamp);
+  InitImuMsg(imu_data, imu_msg, timestamp, index);
 
 #ifdef BUILDING_ROS1
   PublisherPtr publisher_ptr = GetCurrentImuPublisher(index);

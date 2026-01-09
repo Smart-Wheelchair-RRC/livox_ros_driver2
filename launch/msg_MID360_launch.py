@@ -14,6 +14,10 @@ frame_id = "livox_frame"
 lvx_file_path = "/home/livox/livox_test.lvx"
 cmdline_bd_code = "livox0000000001"
 
+# True: invert the lidar upside down; False: normal installation; 
+# will only work when extrinsics rpy are zero in the lidar config file, else extrinsics will be used
+invert_lidar = True  
+
 cur_path = os.path.split(os.path.realpath(__file__))[0] + "/"
 cur_config_path = cur_path + "../config"
 user_config_path = os.path.join(cur_config_path, "MID360_config.json")
@@ -29,6 +33,7 @@ livox_ros2_params = [
     {"lvx_file_path": lvx_file_path},
     {"user_config_path": user_config_path},
     {"cmdline_input_bd_code": cmdline_bd_code},
+    {"invert_lidar": invert_lidar}, # will only work when extrinsics rpy are zero in the lidar config file, else extrinsics will be used
 ]
 
 
