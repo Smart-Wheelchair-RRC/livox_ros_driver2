@@ -1,3 +1,7 @@
+## Note the changes
+* Applied extrinsic rotations to IMU data to fix issues with FastLIO. Now the extrinsic RPY in the config will be applied to both the Pointcloud and IMU data.
+* Added "invert_lidar" parameter, which will apply a 180-degree rotation about the x-axis to both the Pointcloud and IMU data, when set to "true" -> only when the extrinsics roll, pitch and yaw are all set to 0, else extrinsics will be applied. This is useful when the lidar is mounted inverted.
+
 # Livox ROS Driver 2
 
 Livox ROS Driver 2 is the 2nd-generation driver package used to connect LiDAR products produced by Livox, applicable for ROS (noetic recommended) and ROS2 (foxy or humble recommended).
