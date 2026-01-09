@@ -41,8 +41,9 @@ namespace livox_ros {
 
 /** Lidar Data Distribute Control--------------------------------------------*/
 #ifdef BUILDING_ROS1
+// [Modified] Added invert_lidar argument
 Lddc::Lddc(int format, int multi_topic, int data_src, int output_type,
-    double frq, std::string &frame_id, bool lidar_bag, bool imu_bag)
+    double frq, std::string &frame_id, bool lidar_bag, bool imu_bag, bool invert_lidar)
     : transfer_format_(format),
       use_multi_topic_(multi_topic),
       data_src_(data_src),
@@ -50,7 +51,8 @@ Lddc::Lddc(int format, int multi_topic, int data_src, int output_type,
       publish_frq_(frq),
       frame_id_(frame_id),
       enable_lidar_bag_(lidar_bag),
-      enable_imu_bag_(imu_bag) {
+      enable_imu_bag_(imu_bag),
+      invert_lidar_(invert_lidar) {
   publish_period_ns_ = kNsPerSecond / publish_frq_;
   lds_ = nullptr;
   memset(private_pub_, 0, sizeof(private_pub_));
@@ -62,13 +64,14 @@ Lddc::Lddc(int format, int multi_topic, int data_src, int output_type,
 }
 #elif defined BUILDING_ROS2
 Lddc::Lddc(int format, int multi_topic, int data_src, int output_type,
-           double frq, std::string &frame_id)
+           double frq, std::string &frame_id, bool invert_lidar)
     : transfer_format_(format),
       use_multi_topic_(multi_topic),
       data_src_(data_src),
       output_type_(output_type),
       publish_frq_(frq),
-      frame_id_(frame_id) {
+      frame_id_(frame_id),
+      invert_lidar_(invert_lidar) {
   publish_period_ns_ = kNsPerSecond / publish_frq_;
   lds_ = nullptr;
 #if 0
@@ -320,8 +323,16 @@ void Lddc::InitPointcloud2Msg(const StoragePacket& pkg, PointCloud2& cloud, uint
   for (size_t i = 0; i < pkg.points_num; ++i) {
     LivoxPointXyzrtlt point;
     point.x = pkg.points[i].x;
-    point.y = pkg.points[i].y;
-    point.z = pkg.points[i].z;
+    
+    // [Modified] Invert logic
+    if (invert_lidar_) {
+      point.y = -pkg.points[i].y;
+      point.z = -pkg.points[i].z;
+    } else {
+      point.y = pkg.points[i].y;
+      point.z = pkg.points[i].z;
+    }
+
     point.reflectivity = pkg.points[i].intensity;
     point.tag = pkg.points[i].tag;
     point.line = pkg.points[i].line;
@@ -387,8 +398,16 @@ void Lddc::FillPointsToCustomMsg(CustomMsg& livox_msg, const StoragePacket& pkg)
   for (uint32_t i = 0; i < points_num; ++i) {
     CustomPoint point;
     point.x = points[i].x;
-    point.y = points[i].y;
-    point.z = points[i].z;
+    
+    // [Modified] Invert Logic
+    if (invert_lidar_) {
+      point.y = -points[i].y;
+      point.z = -points[i].z;
+    } else {
+      point.y = points[i].y;
+      point.z = points[i].z;
+    }
+    
     point.reflectivity = points[i].intensity;
     point.tag = points[i].tag;
     point.line = points[i].line;
@@ -445,8 +464,16 @@ void Lddc::FillPointsToPclMsg(const StoragePacket& pkg, PointCloud& pcl_msg) {
   for (uint32_t i = 0; i < points_num; ++i) {
     pcl::PointXYZI point;
     point.x = points[i].x;
-    point.y = points[i].y;
-    point.z = points[i].z;
+    
+    // [Modified] Invert Logic
+    if (invert_lidar_) {
+      point.y = -points[i].y;
+      point.z = -points[i].z;
+    } else {
+      point.y = points[i].y;
+      point.z = points[i].z;
+    }
+
     point.intensity = points[i].intensity;
 
     pcl_msg.points.push_back(std::move(point));
@@ -487,12 +514,22 @@ void Lddc::InitImuMsg(const ImuData& imu_data, ImuMsg& imu_msg, uint64_t& timest
   imu_msg.header.stamp = rclcpp::Time(timestamp);  // to ros time stamp
 #endif
 
-  imu_msg.angular_velocity.x = imu_data.gyro_x;
-  imu_msg.angular_velocity.y = imu_data.gyro_y;
-  imu_msg.angular_velocity.z = imu_data.gyro_z;
-  imu_msg.linear_acceleration.x = imu_data.acc_x;
-  imu_msg.linear_acceleration.y = imu_data.acc_y;
-  imu_msg.linear_acceleration.z = imu_data.acc_z;
+  // [Modified] Invert IMU Logic (Flip Y and Z axes)
+  if (invert_lidar_) {
+      imu_msg.angular_velocity.x = imu_data.gyro_x;
+      imu_msg.angular_velocity.y = -imu_data.gyro_y;
+      imu_msg.angular_velocity.z = -imu_data.gyro_z;
+      imu_msg.linear_acceleration.x = imu_data.acc_x;
+      imu_msg.linear_acceleration.y = -imu_data.acc_y;
+      imu_msg.linear_acceleration.z = -imu_data.acc_z;
+  } else {
+      imu_msg.angular_velocity.x = imu_data.gyro_x;
+      imu_msg.angular_velocity.y = imu_data.gyro_y;
+      imu_msg.angular_velocity.z = imu_data.gyro_z;
+      imu_msg.linear_acceleration.x = imu_data.acc_x;
+      imu_msg.linear_acceleration.y = imu_data.acc_y;
+      imu_msg.linear_acceleration.z = imu_data.acc_z;
+  }
 }
 
 void Lddc::PublishImuData(LidarImuDataQueue& imu_data_queue, const uint8_t index) {
